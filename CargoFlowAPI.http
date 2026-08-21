@@ -1,6 +1,42 @@
 @CargoFlowAPI_HostAddress = http://localhost:5242
 
-GET {{CargoFlowAPI_HostAddress}}/weatherforecast/
+GET {{CargoFlowAPI_HostAddress}}/shipments
 Accept: application/json
 
 ###
+
+POST {{CargoFlowAPI_HostAddress}}/shipments
+Content-Type: application/json
+
+{
+  "trackingNumber": "CF-2026-0003",
+  "origin": "São Paulo",
+  "destination": "Porto Alegre",
+  "status": "Pending"
+}
+
+###
+
+GET {{CargoFlowAPI_HostAddress}}/shipments/2
+Accept: application/json
+
+###
+
+GET {{CargoFlowAPI_HostAddress}}/shipments/999
+Accept: application/json
+
+###
+
+PUT {{CargoFlowAPI_HostAddress}}/shipments/1
+Content-Type: application/json
+
+{
+  "trackingNumber": "CF-2026-0001",
+  "origin": "São Paulo",
+  "destination": "Rio de Janeiro",
+  "status": "Delivered"
+}
+
+###
+
+DELETE {{CargoFlowAPI_HostAddress}}/shipments/2
