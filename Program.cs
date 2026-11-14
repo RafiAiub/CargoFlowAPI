@@ -1,104 +1,174 @@
+using CargoFlowAPI.Data;
 using CargoFlowAPI.DTOs;
 using CargoFlowAPI.Models;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddOpenApi();
+// Na hospedagem (Render) a porta vem na variável PORT.
+var port = Environment.GetEnvironmentVariable("PORT");
+if (!string.IsNullOrEmpty(port))
+{
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
+// A conexão com o banco vem de fora do código (variável de ambiente).
+var connectionString = builder.Configuration.GetConnectionString("Default")
+    ?? throw new InvalidOperationException(
+        "Defina a variável de ambiente ConnectionStrings__Default com a conexão do Postgres.");
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(ToNpgsqlConnectionString(connectionString)));
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+// Cria as tabelas (se não existirem) e insere dados de exemplo (se estiver vazio).
+using (var scope = app.Services.CreateScope())
 {
-    app.MapOpenApi();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.EnsureCreated();
+
+    if (!db.Shipments.Any())
+    {
+        db.Shipments.AddRange(
+            new Shipment { TrackingNumber = "CF-2026-0001", Origin = "São Paulo", Destination = "Curitiba", Status = "In Transit" },
+            new Shipment { TrackingNumber = "CF-2026-0002", Origin = "Rio de Janeiro", Destination = "Belo Horizonte", Status = "Delivered" },
+            new Shipment { TrackingNumber = "CF-2026-0003", Origin = "Porto Alegre", Destination = "Florianópolis", Status = "Pending" }
+        );
+        db.SaveChanges();
+    }
 }
 
-var shipments = new List<Shipment>
+// Serve a página do front (wwwroot/index.html)
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// Listar (com busca opcional por código de rastreio)
+app.MapGet("/shipments", async (AppDbContext db, string? search) =>
 {
-    new Shipment
+    var query = db.Shipments.AsQueryable();
+
+    if (!string.IsNullOrWhiteSpace(search))
     {
-        Id = 1,
-        TrackingNumber = "CF-2026-0001",
-        Origin = "São Paulo",
-        Destination = "Curitiba",
-        Status = "In Transit",
-        CreatedAt = DateTime.Now
-    },
-    new Shipment
-    {
-        Id = 2,
-        TrackingNumber = "CF-2026-0002",
-        Origin = "Rio de Janeiro",
-        Destination = "Belo Horizonte",
-        Status = "Delivered",
-        CreatedAt = DateTime.Now
-    }
-};
-
-var nextId = 3;
-
-app.MapGet("/shipments", () =>
-{
-    return shipments;
-});
-
-app.MapGet("/shipments/{id}", (int id) =>
-{
-    var shipment = shipments.FirstOrDefault(s => s.Id == id);
-
-    if (shipment is null)
-    {
-        return Results.NotFound();
+        var term = search.Trim();
+        query = query.Where(s => EF.Functions.ILike(s.TrackingNumber, $"%{term}%"));
     }
 
-    return Results.Ok(shipment);
+    var list = await query.OrderBy(s => s.Id).ToListAsync();
+    return Results.Ok(list);
 });
 
-app.MapPost("/shipments", (CreateShipmentDto dto) =>
+// Buscar por id
+app.MapGet("/shipments/{id:int}", async (int id, AppDbContext db) =>
 {
+    var shipment = await db.Shipments.FindAsync(id);
+    return shipment is null
+        ? Results.NotFound(new { error = "Remessa não encontrada." })
+        : Results.Ok(shipment);
+});
+
+// Criar
+app.MapPost("/shipments", async (ShipmentDto dto, AppDbContext db) =>
+{
+    var error = Validate(dto);
+    if (error is not null) return Results.BadRequest(new { error });
+
+    var code = dto.TrackingNumber!.Trim().ToUpper();
+    if (await db.Shipments.AnyAsync(s => s.TrackingNumber == code))
+        return Results.Conflict(new { error = "Já existe uma remessa com esse código." });
+
     var shipment = new Shipment
     {
-        Id = nextId++,
-        TrackingNumber = dto.TrackingNumber,
-        Origin = dto.Origin,
-        Destination = dto.Destination,
-        Status = dto.Status,
-        CreatedAt = DateTime.Now
+        TrackingNumber = code,
+        Origin = dto.Origin!.Trim(),
+        Destination = dto.Destination!.Trim(),
+        Status = dto.Status!,
+        CreatedAt = DateTime.UtcNow
     };
 
-    shipments.Add(shipment);
-
-    return shipment;
+    db.Shipments.Add(shipment);
+    await db.SaveChangesAsync();
+    return Results.Created($"/shipments/{shipment.Id}", shipment);
 });
 
-app.MapPut("/shipments/{id}", (int id, Shipment updatedShipment) =>
+// Editar
+app.MapPut("/shipments/{id:int}", async (int id, ShipmentDto dto, AppDbContext db) =>
 {
-    var shipment = shipments.FirstOrDefault(s => s.Id == id);
+    var shipment = await db.Shipments.FindAsync(id);
+    if (shipment is null) return Results.NotFound(new { error = "Remessa não encontrada." });
 
-    if (shipment is null)
-    {
-        return Results.NotFound();
-    }
+    var error = Validate(dto);
+    if (error is not null) return Results.BadRequest(new { error });
 
-    shipment.TrackingNumber = updatedShipment.TrackingNumber;
-    shipment.Origin = updatedShipment.Origin;
-    shipment.Destination = updatedShipment.Destination;
-    shipment.Status = updatedShipment.Status;
+    var code = dto.TrackingNumber!.Trim().ToUpper();
+    if (await db.Shipments.AnyAsync(s => s.TrackingNumber == code && s.Id != id))
+        return Results.Conflict(new { error = "Já existe uma remessa com esse código." });
 
+    shipment.TrackingNumber = code;
+    shipment.Origin = dto.Origin!.Trim();
+    shipment.Destination = dto.Destination!.Trim();
+    shipment.Status = dto.Status!;
+
+    await db.SaveChangesAsync();
     return Results.Ok(shipment);
 });
 
-app.MapDelete("/shipments/{id}", (int id) =>
+// Atualizar só o status
+app.MapPatch("/shipments/{id:int}/status", async (int id, StatusDto dto, AppDbContext db) =>
 {
-    var shipment = shipments.FirstOrDefault(s => s.Id == id);
+    if (dto.Status is null || !Shipment.ValidStatuses.Contains(dto.Status))
+        return Results.BadRequest(new { error = "Status inválido." });
 
-    if (shipment is null)
-    {
-        return Results.NotFound();
-    }
+    var shipment = await db.Shipments.FindAsync(id);
+    if (shipment is null) return Results.NotFound(new { error = "Remessa não encontrada." });
 
-    shipments.Remove(shipment);
+    shipment.Status = dto.Status;
+    await db.SaveChangesAsync();
+    return Results.Ok(shipment);
+});
 
+// Excluir
+app.MapDelete("/shipments/{id:int}", async (int id, AppDbContext db) =>
+{
+    var shipment = await db.Shipments.FindAsync(id);
+    if (shipment is null) return Results.NotFound(new { error = "Remessa não encontrada." });
+
+    db.Shipments.Remove(shipment);
+    await db.SaveChangesAsync();
     return Results.NoContent();
 });
 
 app.Run();
+
+// ---------- funções auxiliares ----------
+
+static string? Validate(ShipmentDto dto)
+{
+    if (string.IsNullOrWhiteSpace(dto.TrackingNumber)) return "Informe o código de rastreio.";
+    if (dto.TrackingNumber.Trim().Length > 30) return "O código de rastreio deve ter no máximo 30 caracteres.";
+    if (string.IsNullOrWhiteSpace(dto.Origin)) return "Informe a origem.";
+    if (string.IsNullOrWhiteSpace(dto.Destination)) return "Informe o destino.";
+    if (dto.Status is null || !Shipment.ValidStatuses.Contains(dto.Status)) return "Status inválido.";
+    return null;
+}
+
+// Aceita tanto "Host=...;Database=..." quanto o formato "postgresql://usuario:senha@host:porta/banco"
+static string ToNpgsqlConnectionString(string value)
+{
+    if (!value.StartsWith("postgres", StringComparison.OrdinalIgnoreCase))
+        return value;
+
+    var uri = new Uri(value);
+    var userInfo = uri.UserInfo.Split(':', 2);
+
+    return new NpgsqlConnectionStringBuilder
+    {
+        Host = uri.Host,
+        Port = uri.Port > 0 ? uri.Port : 5432,
+        Username = Uri.UnescapeDataString(userInfo[0]),
+        Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "",
+        Database = uri.AbsolutePath.TrimStart('/'),
+        SslMode = SslMode.Require
+    }.ConnectionString;
+}

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CargoFlow – Gestão de Remessas</title>
+  <style>
+    :root {
+      --bg: #f4f6fa; --card: #ffffff; --text: #1f2937; --muted: #6b7280;
+      --primary: #1d4ed8; --primary-dark: #1e40af; --danger: #dc2626;
+      --border: #e5e7eb; --ok: #166534; --ok-bg: #dcfce7; --err: #991b1b; --err-bg: #fee2e2;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    header { background: var(--primary); color: #fff; padding: 20px 16px; }
+    header h1 { margin: 0; font-size: 1.5rem; }
+    header p { margin: 4px 0 0; opacity: .9; font-size: .95rem; }
+    main { max-width: 960px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    h2 { margin: 0 0 12px; font-size: 1.1rem; }
+    form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+    label { display: grid; gap: 4px; font-size: .85rem; color: var(--muted); }
+    input, select { padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: .95rem; font-family: inherit; width: 100%; }
+    button { padding: 9px 14px; border: 0; border-radius: 6px; font-size: .9rem; cursor: pointer; background: var(--primary); color: #fff; }
+    button:hover { background: var(--primary-dark); }
+    button.secondary { background: #e5e7eb; color: var(--text); }
+    button.secondary:hover { background: #d1d5db; }
+    button.danger { background: var(--danger); }
+    button.danger:hover { background: #b91c1c; }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar input { flex: 1; min-width: 200px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+    td select { width: auto; padding: 6px 8px; }
+    .msg { padding: 10px 12px; border-radius: 6px; font-size: .9rem; display: none; }
+    .msg.ok { display: block; background: var(--ok-bg); color: var(--ok); }
+    .msg.err { display: block; background: var(--err-bg); color: var(--err); }
+    .empty { color: var(--muted); padding: 16px 0; text-align: center; }
+    footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CargoFlow</h1>
+    <p>Gestão de remessas e rastreamento de cargas</p>
+  </header>
+
+  <main>
+    <div id="msg" class="msg" role="status"></div>
+
+    <section class="card">
+      <h2 id="form-title">Nova remessa</h2>
+      <form id="shipment-form">
+        <label>Código de rastreio
+          <input id="trackingNumber" maxlength="30" placeholder="CF-2026-0004" required>
+        </label>
+        <label>Origem
+          <input id="origin" maxlength="100" placeholder="São Paulo" required>
+        </label>
+        <label>Destino
+          <input id="destination" maxlength="100" placeholder="Curitiba" required>
+        </label>
+        <label>Status
+          <select id="status"></select>
+        </label>
+        <div class="row-actions">
+          <button type="submit" id="submit-btn">Cadastrar</button>
+          <button type="button" id="cancel-btn" class="secondary" hidden>Cancelar edição</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Remessas</h2>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Buscar por código de rastreio...">
+        <button id="search-btn" type="button">Buscar</button>
+        <button id="clear-btn" type="button" class="secondary">Limpar</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Código</th><th>Origem</th><th>Destino</th><th>Status</th><th>Criada em</th><th>Ações</th></tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" hidden>Nenhuma remessa encontrada.</div>
+    </section>
+  </main>
+
+  <footer>CargoFlow – projeto acadêmico (PIT)</footer>
+
+  <script>
+    const STATUS = {
+      "Pending": "Pendente",
+      "In Transit": "Em trânsito",
+      "Delivered": "Entregue",
+      "Cancelled": "Cancelada"
+    };
+
+    const $ = (selector) => document.querySelector(selector);
+    let editingId = null;
+    let msgTimer = null;
+
+    function showMessage(text, type) {
+      const el = $("#msg");
+      el.textContent = text;
+      el.className = "msg " + type;
+      clearTimeout(msgTimer);
+      msgTimer = setTimeout(() => { el.className = "msg"; }, 5000);
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      if (response.status === 204) return null;
+      let data = null;
+      try { data = await response.json(); } catch (e) { /* sem corpo */ }
+      if (!response.ok) throw new Error((data && data.error) || "Erro inesperado. Tente novamente.");
+      return data;
+    }
+
+    function fillStatusOptions(select, selected) {
+      select.innerHTML = "";
+      for (const [value, label] of Object.entries(STATUS)) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        if (value === selected) option.selected = true;
+        select.appendChild(option);
+      }
+    }
+
+    function cell(text) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      return td;
+    }
+
+    function renderRow(shipment) {
+      const tr = document.createElement("tr");
+      tr.appendChild(cell(shipment.trackingNumber));
+      tr.appendChild(cell(shipment.origin));
+      tr.appendChild(cell(shipment.destination));
+
+      const statusTd = document.createElement("td");
+      const select = document.createElement("select");
+      fillStatusOptions(select, shipment.status);
+      select.addEventListener("change", async () => {
+        try {
+          await api(`/shipments/${shipment.id}/status`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: select.value })
+          });
+          showMessage("Status atualizado.", "ok");
+        } catch (e) {
+          showMessage(e.message, "err");
+          load();
+        }
+      });
+      statusTd.appendChild(select);
+      tr.appendChild(statusTd);
+
+      tr.appendChild(cell(new Date(shipment.createdAt).toLocaleString("pt-BR")));
+
+      const actionsTd = document.createElement("td");
+      const actions = document.createElement("div");
+      actions.className = "row-actions";
+
+      const editBtn = document.createElement("button");
+      editBtn.textContent = "Editar";
+      editBtn.className = "secondary";
+      editBtn.addEventListener("click", () => startEdit(shipment));
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.textContent = "Excluir";
+      deleteBtn.className = "danger";
+      deleteBtn.addEventListener("click", () => removeShipment(shipment));
+
+      actions.append(editBtn, deleteBtn);
+      actionsTd.appendChild(actions);
+      tr.appendChild(actionsTd);
+      return tr;
+    }
+
+    async function load() {
+      const term = $("#search").value.trim();
+      try {
+        const list = await api("/shipments" + (term ? "?search=" + encodeURIComponent(term) : ""));
+        const tbody = $("#tbody");
+        tbody.innerHTML = "";
+        list.forEach((s) => tbody.appendChild(renderRow(s)));
+        $("#empty").hidden = list.length > 0;
+      } catch (e) {
+        showMessage(e.message, "err");
+      }
+    }
+
+    function startEdit(shipment) {
+      editingId = shipment.id;
+      $("#trackingNumber").value = shipment.trackingNumber;
+      $("#origin").value = shipment.origin;
+      $("#destination").value = shipment.destination;
+      $("#status").value = shipment.status;
+      $("#form-title").textContent = "Editar remessa";
+      $("#submit-btn").textContent = "Salvar alterações";
+      $("#cancel-btn").hidden = false;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function resetForm() {
+      editingId = null;
+      $("#shipment-form").reset();
+      $("#status").value = "Pending";
+      $("#form-title").textContent = "Nova remessa";
+      $("#submit-btn").textContent = "Cadastrar";
+      $("#cancel-btn").hidden = true;
+    }
+
+    async function removeShipment(shipment) {
+      if (!confirm(`Excluir a remessa ${shipment.trackingNumber}?`)) return;
+      try {
+        await api(`/shipments/${shipment.id}`, { method: "DELETE" });
+        showMessage("Remessa excluída.", "ok");
+        if (editingId === shipment.id) resetForm();
+        load();
+      } catch (e) {
+        showMessage(e.message, "err");
+      }
+    }
+
+    $("#shipment-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = JSON.stringify({
+        trackingNumber: $("#trackingNumber").value,
+        origin: $("#origin").value,
+        destination: $("#destination").value,
+        status: $("#status").value
+      });
+      try {
+        if (editingId === null) {
+          await api("/shipments", { method: "POST", body });
+          showMessage("Remessa cadastrada com sucesso.", "ok");
+        } else {
+          await api(`/shipments/${editingId}`, { method: "PUT", body });
+          showMessage("Remessa atualizada com sucesso.", "ok");
+        }
+        resetForm();
+        load();
+      } catch (e) {
+        showMessage(e.message, "err");
+      }
+    });
+
+    $("#cancel-btn").addEventListener("click", resetForm);
+    $("#search-btn").addEventListener("click", load);
+    $("#search").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+    $("#clear-btn").addEventListener("click", () => { $("#search").value = ""; load(); });
+
+    fillStatusOptions($("#status"), "Pending");
+    load();
+  </script>
+</body>
+</html>
